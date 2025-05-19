@@ -270,16 +270,17 @@ class GSRasterizer(object):
                 # TODO: Perform alpha blending
                 weighted_opacity = weights * alphas.squeeze().unsqueeze(0)
                 # shape = [P,N]
-                transparency = torch.cumprod(1 - weighted_opacity, dim=1)
+                transparency = torch.cumprod(1 - weighted_opacity + 1e-7, dim=1)
                 ones = torch.ones((P,1), device = transparency.device)
                 # Now, we add this to transparecy
+                residual_transparency = transparency[:,-1]
                 transparency = torch.cat([ones, transparency[:,:-1]], dim=1)
                 # shape = [P,N]
                 contributions = colors.unsqueeze(0) * \
                     weighted_opacity.unsqueeze(2) * \
                         transparency.unsqueeze(2)
                 # We get [1,N,3] * [P,N,1] * [P,N,1]
-                tile_color = contributions.sum(dim=1)
+                tile_color = contributions.sum(dim=1) + residual_transparency.unsqueeze(-1)
                 # shape: [P,3]
 
                 # ========================================================
