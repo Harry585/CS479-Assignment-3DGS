@@ -136,12 +136,17 @@ class GSRasterizer(object):
         - in_mask: Mask of points that are in the frustum.
         """
         # ========================================================
-        # TODO: Implement the projection to NDC space
-        p_ndc = None
-        p_view = None
-
-        # TODO: Cull points that are close or behind the camera
-        in_mask = None
+        # First, turn each of the points into homogenous coordinates (is this in object coordinates?)
+        homogenous_points = homogenize(points)
+        # Then, multiply by w2c aka the viewing transformation, to obtain camera coordinates
+        p_view = homogenous_points @ w2c
+        p_proj = p_view @ proj_mat
+        # Then, do a projective transformation by dividing everything by omega (last homogenous coordinate)
+        # To get NDC coords
+        omegas = torch.unsqueeze(p_proj[...,-1], dim=1)
+        p_ndc = p_proj / omegas
+        # Cull points that are close or behind the camera
+        in_mask = p_view[:,2] >= z_near
         # ========================================================
 
         return p_ndc, p_view, in_mask
@@ -178,13 +183,21 @@ class GSRasterizer(object):
         # ========================================================
         # TODO: Transform 3D mean coordinates to camera space
         # ========================================================
-
+        means = (homogenize(mean_3d) @ w2c)[...,:-1]
         # Transpose the rigid transformation part of the world-to-camera matrix
         J = torch.zeros(mean_3d.shape[0], 3, 3).to(mean_3d)
         W = w2c[:3, :3].T
         # ========================================================
         # TODO: Compute Jacobian of view transform and projection
-        cov_2d = None
+        mean_x = means[:,0]
+        mean_y = means[:,1]
+        mean_z = means[:,2]
+        J[:,0,0] = f_x / mean_z
+        J[:,0,2] = - f_x * mean_x / (mean_z * mean_z)
+        J[:,1,1] = f_y / mean_z
+        J[:,1,2] = - f_y * mean_y / (mean_z * mean_z)
+        # Idea: W should be in shape[1,3,3] to batch matrix multiply
+        cov_2d = J @ W.unsqueeze(0) @ cov_3d @ W.unsqueeze(0).transpose(1,2) @ J.transpose(1,2)
         # ========================================================
 
         # add low pass filter here according to E.q. 32
@@ -225,21 +238,50 @@ class GSRasterizer(object):
                 if not in_mask.sum() > 0:
                     continue
 
+                P = self.tile_size * self.tile_size
                 # ========================================================
                 # TODO: Sort the projected Gaussians that lie in the current tile by their depths, in ascending order
                 # ========================================================
-                
+                depth_order = depths[in_mask].argsort()
+                means = mean_2d[in_mask][depth_order]
+                covs = cov_2d[in_mask][depth_order]
+                colors = color[in_mask][depth_order]
+                alphas = opacities[in_mask][depth_order]
                 # ========================================================
                 # TODO: Compute the displacement vector from the 2D mean coordinates to the pixel coordinates
                 # ========================================================
-
+                pixels = pix_coord[h:h+self.tile_size, w:w+self.tile_size]
+                # Reshape
+                pixels = pixels.reshape(-1, 2)
+                # We assume that means is in units of pixels, which might not be true?
+                # We want pixels.shape = [P,1,2]
+                displacements = pixels.unsqueeze(1) - means.unsqueeze(0)
                 # ========================================================
                 # TODO: Compute the Gaussian weight for each pixel in the tile
                 # ========================================================
+                precision_matrix = torch.inverse(covs).unsqueeze(0)
+                mahalanobis = displacements.unsqueeze(2) @ precision_matrix @ displacements.unsqueeze(3)
+                # shape: [P,N,1,1]
+                mahalanobis = mahalanobis.squeeze(-1).squeeze(-1)
+                # This prevents error in the edge case if N=1 or P=1
+                weights = torch.exp(-0.5 * mahalanobis)
 
                 # ========================================================
                 # TODO: Perform alpha blending
-                tile_color = None
+                weighted_opacity = weights * alphas.squeeze().unsqueeze(0)
+                # shape = [P,N]
+                transparency = torch.cumprod(1 - weighted_opacity, dim=1)
+                ones = torch.ones((P,1), device = transparency.device)
+                # Now, we add this to transparecy
+                transparency = torch.cat([ones, transparency[:,:-1]], dim=1)
+                # shape = [P,N]
+                contributions = colors.unsqueeze(0) * \
+                    weighted_opacity.unsqueeze(2) * \
+                        transparency.unsqueeze(2)
+                # We get [1,N,3] * [P,N,1] * [P,N,1]
+                tile_color = contributions.sum(dim=1)
+                # shape: [P,3]
+
                 # ========================================================
 
                 render_color[h:h+self.tile_size, w:w+self.tile_size] = tile_color.reshape(self.tile_size, self.tile_size, -1)

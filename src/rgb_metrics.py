@@ -44,7 +44,7 @@ def compute_ssim_between_directories(pred_dir: Path, target_dir: Path) -> float:
 
 @torch.no_grad()
 def compute_metric_between_directories(
-    pred_dir: Path, target_dir: Path, metric_func: Callable, batch_size: int = 32,
+    pred_dir: Path, target_dir: Path, metric_func: Callable, batch_size: int = 16,
 ) -> float:
     """
     Evaluates the given metric between the image pairs under two directories.
